@@ -8,8 +8,9 @@ permissions:
 
 jobs:
   extract:
-    name: Extract ZIP into Repository
+    name: Extract Project Into Repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -17,7 +18,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify ZIP
+      - name: Find ZIP
         shell: bash
         run: |
           set -e
@@ -25,14 +26,15 @@ jobs:
           ZIP="JEE-Tracker-Android-Firebase-Updated-Safe.zip"
 
           if [ ! -f "$ZIP" ]; then
-            echo "ERROR: $ZIP was not found in the repository."
+            echo "ERROR: ZIP not found:"
+            echo "$ZIP"
             echo ""
-            echo "Files currently in repository:"
-            find . -maxdepth 2 -type f | sort
+            echo "Repository contents:"
+            find . -maxdepth 3 -type f | sort
             exit 1
           fi
 
-          echo "Found:"
+          echo "ZIP found:"
           ls -lh "$ZIP"
 
       - name: Extract ZIP
@@ -43,41 +45,49 @@ jobs:
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q \
+          unzip -q -o \
             "JEE-Tracker-Android-Firebase-Updated-Safe.zip" \
             -d extracted
 
-          echo "ZIP extracted successfully."
+          echo "ZIP contents:"
+          find extracted -maxdepth 5 -type f | sort
 
-      - name: Locate project root
+      - name: Locate actual project root
         shell: bash
         run: |
           set -e
 
-          echo "Searching extracted project..."
+          echo "Searching for www/index.html..."
 
-          if [ -f "extracted/www/index.html" ]; then
-            PROJECT_ROOT="extracted"
-          else
-            PROJECT_ROOT=$(find extracted -type f -path "*/www/index.html" \
-              -printf '%h/../\n' | head -n 1 | xargs -r realpath)
+          INDEX_FILE=$(find extracted \
+            -type f \
+            -path "*/www/index.html" \
+            | head -n 1)
 
-            if [ -z "$PROJECT_ROOT" ] || [ ! -f "$PROJECT_ROOT/www/index.html" ]; then
-              echo "ERROR: Could not locate www/index.html."
-              find extracted -maxdepth 4 -type f | sort
-              exit 1
-            fi
+          if [ -z "$INDEX_FILE" ]; then
+            echo "ERROR: www/index.html could not be found."
+            echo ""
+            echo "Actual extracted files:"
+            find extracted -maxdepth 6 -type f | sort
+            exit 1
           fi
+
+          echo "Found:"
+          echo "$INDEX_FILE"
+
+          PROJECT_ROOT=$(dirname "$(dirname "$INDEX_FILE")")
+
+          echo "Detected project root:"
+          echo "$PROJECT_ROOT"
 
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
-          echo "Project root:"
-          echo "$PROJECT_ROOT"
-
-      - name: Verify extracted project
+      - name: Verify project
         shell: bash
         run: |
           set -e
+
+          echo "Checking project files..."
 
           test -f "$PROJECT_ROOT/www/index.html"
           test -f "$PROJECT_ROOT/www/schedule.html"
@@ -91,7 +101,8 @@ jobs:
 
           test -f "$PROJECT_ROOT/firebase/google-services.json"
 
-          echo "All required project files verified."
+          echo ""
+          echo "All required files found."
 
       - name: Remove generated build files
         shell: bash
@@ -102,92 +113,88 @@ jobs:
           rm -rf "$PROJECT_ROOT/node_modules"
           rm -rf "$PROJECT_ROOT/.gradle"
 
-          echo "Generated build directories removed."
+          echo "Generated build files removed."
 
-      - name: Security scan
+      - name: Security check
         shell: bash
         run: |
           set -e
 
-          echo "Checking for forbidden private-key files..."
+          echo "Checking for private credentials..."
 
-          FOUND=0
+          FORBIDDEN=$(find "$PROJECT_ROOT" \
+            -type f \
+            \( \
+              -name "*.jks" \
+              -o -name "*.keystore" \
+              -o -name "*.p12" \
+              -o -name "*.pem" \
+              -o -name "*.key" \
+              -o -name "firebase-adminsdk*.json" \
+            \)
 
-          while IFS= read -r file; do
-            echo "FORBIDDEN FILE FOUND: $file"
-            FOUND=1
-          done < <(
-            find "$PROJECT_ROOT" \
-              -type f \
-              \( \
-                -name "*.jks" \
-                -o -name "*.keystore" \
-                -o -name "*.p12" \
-                -o -name "*.pem" \
-                -o -name "*.key" \
-                -o -name "firebase-adminsdk*.json" \
-              \)
-          )
-
-          if [ "$FOUND" -ne 0 ]; then
-            echo ""
-            echo "ERROR: Private signing or service-account files detected."
-            echo "These must NOT be committed."
+          if [ -n "$FORBIDDEN" ]; then
+            echo "ERROR: Forbidden private files detected:"
+            echo "$FORBIDDEN"
             exit 1
           fi
 
-          echo "Security file check passed."
+          echo "Security check passed."
 
-      - name: Copy project into repository
+      - name: Copy project to repository root
         shell: bash
         run: |
           set -e
 
-          echo "Copying extracted project into repository..."
+          echo "Copying project..."
 
-          # Copy all normal project files/directories.
+          # Remove everything except Git metadata and .github.
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name ".git" \
+            ! -name ".github" \
+            ! -name "extracted" \
+            -exec rm -rf {} +
+
+          # Copy the actual project.
           cp -a "$PROJECT_ROOT"/. .
 
-          # Never copy the temporary extraction directory itself.
-          rm -rf extracted
+          echo "Project copied."
 
-          echo "Repository now contains:"
-          find . -maxdepth 2 -type f | sort
-
-      - name: Remove ZIP from repository
+      - name: Remove temporary files
         shell: bash
         run: |
           set -e
 
+          rm -rf extracted
           rm -f "JEE-Tracker-Android-Firebase-Updated-Safe.zip"
 
-          echo "Original ZIP removed from repository."
-          echo "The extracted project will remain."
+          echo "Temporary ZIP and extraction directory removed."
 
-      - name: Show final project structure
+      - name: Final verification
         shell: bash
         run: |
           set -e
 
-          echo "========================================"
-          echo "FINAL PROJECT"
-          echo "========================================"
+          echo "======================================"
+          echo "FINAL REPOSITORY CHECK"
+          echo "======================================"
 
           test -f www/index.html
           test -f www/schedule.html
           test -f www/test-analysis.html
           test -f package.json
           test -f capacitor.config.ts
+          test -f tsconfig.json
+          test -f native-android/apply-widgets.py
           test -f firebase/google-services.json
 
           echo ""
-          echo "Main files:"
-          find . -maxdepth 2 -type f \
+          echo "SUCCESS."
+          echo ""
+          echo "Repository structure:"
+          find . -maxdepth 3 -type f \
             ! -path "./.git/*" \
             | sort
-
-          echo ""
-          echo "Project extraction completed successfully."
 
       - name: Commit extracted project
         shell: bash
@@ -200,10 +207,10 @@ jobs:
           git add -A
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "Nothing changed."
             exit 0
           fi
 
-          git commit -m "Extract JEE Tracker Android project"
+          git commit -m "Extract JEE Tracker project"
 
           git push
