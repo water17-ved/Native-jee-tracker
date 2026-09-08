@@ -1,58 +1,54 @@
-name: Build JEE Tracker Debug APK
+name: Build Debug APK
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   build:
-    name: Extract and Build Debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-
-      # --------------------------------------------------
-      # 1. Checkout repository
-      # --------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          fetch-depth: 1
+          distribution: temurin
+          java-version: '17'
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      # --------------------------------------------------
-      # 2. Find ZIP
-      # --------------------------------------------------
-      - name: Find project ZIP
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip zip
+
+      - name: Show repository
+        run: |
+          echo "===== REPOSITORY ====="
+          find . -maxdepth 3 -type f | sort | head -300
+
+      - name: Find ZIP
+        id: zip
         shell: bash
         run: |
           set -e
 
-          echo "Repository contents:"
-          find . -maxdepth 2 -type f | sort
-
-          ZIP=$(find . -maxdepth 2 -type f \
-            -name "*.zip" \
+          ZIP_FILE=$(find . -type f -iname "*.zip" \
+            -not -path "./.git/*" \
             | head -n 1)
 
-          if [ -z "$ZIP" ]; then
+          if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: No ZIP file found."
             exit 1
           fi
 
-          echo "ZIP found:"
-          echo "$ZIP"
+          echo "ZIP FOUND: $ZIP_FILE"
+          echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
-          echo "ZIP_PATH=$ZIP" >> "$GITHUB_ENV"
-
-
-      # --------------------------------------------------
-      # 3. Extract ZIP
-      # --------------------------------------------------
-      - name: Extract project ZIP
+      - name: Extract project
         shell: bash
         run: |
           set -e
@@ -60,339 +56,200 @@ jobs:
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q -o "$ZIP_PATH" -d extracted
+          unzip -q "${{ steps.zip.outputs.zip }}" -d extracted
 
-          echo ""
-          echo "Extracted files:"
-          find extracted -maxdepth 4 -type f | sort
+          echo "===== EXTRACTED STRUCTURE ====="
+          find extracted -maxdepth 5 -type f | sort | head -500
 
-
-      # --------------------------------------------------
-      # 4. Detect actual project root
-      # --------------------------------------------------
-      - name: Detect project root
+      - name: Locate HTML project
+        id: project
         shell: bash
         run: |
           set -e
 
-          echo "Searching for project..."
+          INDEX=$(find extracted -type f -iname "index.html" | head -n 1)
 
-          if [ -f "extracted/finalzip/package.json" ]; then
-            PROJECT_ROOT="extracted/finalzip"
-
-          elif [ -f "extracted/package.json" ]; then
-            PROJECT_ROOT="extracted"
-
-          else
-            PROJECT_ROOT=$(find extracted \
-              -mindepth 1 \
-              -maxdepth 3 \
-              -type f \
-              -name "package.json" \
-              -printf '%h\n' \
-              | head -n 1)
-
-          fi
-
-          if [ -z "$PROJECT_ROOT" ] || [ ! -f "$PROJECT_ROOT/package.json" ]; then
-            echo "ERROR: Could not find project root."
-            echo ""
-            echo "Extracted structure:"
-            find extracted -maxdepth 5 -print | sort
+          if [ -z "$INDEX" ]; then
+            echo "ERROR: index.html was not found after extraction."
+            echo
+            echo "Full extracted structure:"
+            find extracted -maxdepth 8 -print
             exit 1
           fi
 
-          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          PROJECT_DIR=$(dirname "$INDEX")
 
-          echo ""
-          echo "======================================"
-          echo "PROJECT ROOT"
-          echo "======================================"
-          echo "$PROJECT_ROOT"
+          echo "index.html found at:"
+          echo "$INDEX"
 
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
 
-      # --------------------------------------------------
-      # 5. Verify source
-      # --------------------------------------------------
-      - name: Verify source project
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Android project
         shell: bash
         run: |
           set -e
 
-          PROJECT="$PROJECT_ROOT"
+          PROJECT="${{ steps.project.outputs.project_dir }}"
 
-          test -f "$PROJECT/package.json"
-          test -f "$PROJECT/capacitor.config.ts"
-          test -f "$PROJECT/tsconfig.json"
+          echo "Using project:"
+          echo "$PROJECT"
 
-          test -f "$PROJECT/www/index.html"
-          test -f "$PROJECT/www/schedule.html"
-          test -f "$PROJECT/www/test-analysis.html"
+          mkdir -p app/src/main/assets
 
-          test -f "$PROJECT/firebase/google-services.json"
+          cp -R "$PROJECT"/. app/src/main/assets/
 
-          test -f "$PROJECT/native-android/apply-widgets.py"
+          echo "===== ASSETS ====="
+          find app/src/main/assets -maxdepth 4 -type f | sort | head -500
 
-          echo ""
-          echo "======================================"
-          echo "SOURCE VERIFICATION PASSED"
-          echo "======================================"
-
-
-      # --------------------------------------------------
-      # 6. Prepare workspace
-      # --------------------------------------------------
-      - name: Prepare build workspace
+      - name: Create Android project
         shell: bash
         run: |
           set -e
 
-          rm -rf build-source
-          mkdir -p build-source
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
 
-          cp -a "$PROJECT_ROOT/." build-source/
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
 
-          cd build-source
+          rootProject.name = "WebApp"
+          include(":app")
+          EOF
 
-          echo "Build source:"
-          find . -maxdepth 3 -type f | sort
+          mkdir -p app/src/main/java/com/example/webapp
 
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+          }
+          EOF
 
-      # --------------------------------------------------
-      # 7. Security check
-      # --------------------------------------------------
-      - name: Security check
-        shell: bash
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.webapp'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.example.webapp'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET"/>
+
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="WebApp"
+                  android:hardwareAccelerated="true"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                  </activity>
+
+              </application>
+
+          </manifest>
+          EOF
+
+          mkdir -p app/src/main/res/values
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#6750A4</item>
+                  <item name="android:windowLightStatusBar">true</item>
+                  <item name="android:statusBarColor">#FFFFFF</item>
+                  <item name="android:navigationBarColor">#FFFFFF</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/example/webapp/MainActivity.java <<'EOF'
+          package com.example.webapp;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  WebView webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setAllowContentAccess(true);
+                  settings.setBuiltInZoomControls(false);
+                  settings.setDisplayZoomControls(false);
+                  settings.setLoadWithOverviewMode(false);
+                  settings.setUseWideViewPort(false);
+
+                  webView.setWebViewClient(new WebViewClient());
+
+                  webView.loadUrl("file:///android_asset/index.html");
+              }
+          }
+          EOF
+
+      - name: Generate Gradle wrapper
         run: |
-          set -e
+          gradle wrapper --gradle-version 8.7
 
-          cd build-source
-
-          FOUND=0
-
-          while IFS= read -r FILE; do
-            echo "FORBIDDEN FILE: $FILE"
-            FOUND=1
-          done < <(
-            find . -type f \
-              \( \
-                -name "*.jks" \
-                -o -name "*.keystore" \
-                -o -name "*.p12" \
-                -o -name "*.pem" \
-                -o -name "*.key" \
-                -o -name "firebase-adminsdk*.json" \
-                -o -name ".env" \
-                -o -name ".env.*" \
-              \)
-          )
-
-          if [ "$FOUND" -ne 0 ]; then
-            echo ""
-            echo "ERROR: Private credential/signing files detected."
-            exit 1
-          fi
-
-          echo "Security check passed."
-
-
-      # --------------------------------------------------
-      # 8. Setup Node
-      # --------------------------------------------------
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 20
-
-
-      # --------------------------------------------------
-      # 9. Setup Java
-      # --------------------------------------------------
-      - name: Setup Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-
-
-      # --------------------------------------------------
-      # 10. Install npm dependencies
-      # --------------------------------------------------
-      - name: Install npm dependencies
-        working-directory: build-source
-        shell: bash
-        run: |
-          set -e
-
-          npm install
-
-          echo ""
-          echo "npm installation completed."
-
-
-      # --------------------------------------------------
-      # 11. Add Android platform
-      # --------------------------------------------------
-      - name: Add Capacitor Android
-        working-directory: build-source
-        shell: bash
-        run: |
-          set -e
-
-          if [ -d "android" ]; then
-            echo "Android directory already exists."
-          else
-            npx cap add android
-          fi
-
-
-      # --------------------------------------------------
-      # 12. Copy Firebase configuration
-      # --------------------------------------------------
-      - name: Configure Firebase
-        working-directory: build-source
-        shell: bash
-        run: |
-          set -e
-
-          test -f firebase/google-services.json
-
-          mkdir -p android/app
-
-          cp firebase/google-services.json \
-            android/app/google-services.json
-
-          echo "Firebase configuration copied."
-
-
-      # --------------------------------------------------
-      # 13. Apply native widgets
-      # --------------------------------------------------
-      - name: Apply native Android widgets
-        working-directory: build-source
-        shell: bash
-        run: |
-          set -e
-
-          if [ -f "native-android/apply-widgets.py" ]; then
-            python3 native-android/apply-widgets.py
-          else
-            echo "Native widget script not found."
-            exit 1
-          fi
-
-
-      # --------------------------------------------------
-      # 14. Capacitor sync
-      # --------------------------------------------------
-      - name: Capacitor sync
-        working-directory: build-source
-        shell: bash
-        run: |
-          set -e
-
-          npx cap sync android
-
-          echo "Capacitor sync completed."
-
-
-      # --------------------------------------------------
-      # 15. Verify Android project
-      # --------------------------------------------------
-      - name: Verify Android project
-        working-directory: build-source
-        shell: bash
-        run: |
-          set -e
-
-          test -d android
-          test -f android/gradlew
-          test -f android/app/google-services.json
-
-          chmod +x android/gradlew
-
-          echo ""
-          echo "Android project ready."
-
-
-      # --------------------------------------------------
-      # 16. Build DEBUG APK
-      # --------------------------------------------------
       - name: Build debug APK
-        working-directory: build-source/android
-        shell: bash
         run: |
-          set -e
+          ./gradlew assembleDebug --stacktrace
 
-          chmod +x gradlew
-
-          ./gradlew assembleDebug --no-daemon
-
-          echo ""
-          echo "======================================"
-          echo "DEBUG BUILD COMPLETED"
-          echo "======================================"
-
-
-      # --------------------------------------------------
-      # 17. Locate APK
-      # --------------------------------------------------
-      - name: Locate APK
-        working-directory: build-source
-        shell: bash
+      - name: Show APK
         run: |
-          set -e
+          find app/build/outputs -type f -print
 
-          APK=$(find android/app/build/outputs/apk/debug \
-            -type f \
-            -name "*.apk" \
-            | head -n 1)
-
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated."
-            find android/app/build/outputs -type f 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "APK found:"
-          ls -lh "$APK"
-
-          mkdir -p ../apk-output
-          cp "$APK" ../apk-output/JEE-Tracker-debug.apk
-
-
-      # --------------------------------------------------
-      # 18. Verify APK
-      # --------------------------------------------------
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -e
-
-          test -f apk-output/JEE-Tracker-debug.apk
-
-          SIZE=$(stat -c%s apk-output/JEE-Tracker-debug.apk)
-
-          if [ "$SIZE" -lt 100000 ]; then
-            echo "ERROR: APK looks suspiciously small."
-            exit 1
-          fi
-
-          echo ""
-          echo "======================================"
-          echo "APK VERIFIED"
-          echo "======================================"
-          echo "File: apk-output/JEE-Tracker-debug.apk"
-          echo "Size: $SIZE bytes"
-
-
-      # --------------------------------------------------
-      # 19. Upload APK
-      # --------------------------------------------------
-      - name: Upload debug APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: JEE-Tracker-debug-APK
-          path: apk-output/JEE-Tracker-debug.apk
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 30
