@@ -21,10 +21,19 @@ jobs:
 
     steps:
 
+      # =========================================================
+      # CHECKOUT
+      # =========================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+
+      # =========================================================
+      # FIND LATEST ZIP
+      # =========================================================
 
       - name: Locate latest project ZIP
         id: locate_zip
@@ -59,27 +68,34 @@ jobs:
                 -- "$zip_name" 2>/dev/null || true
             )"
 
-            [ -z "$commit_time" ] && commit_time=0
+            if [ -z "$commit_time" ]; then
+              commit_time=0
+            fi
 
             if [ "$commit_time" -gt "$latest_time" ]; then
               latest_time="$commit_time"
               latest_name="$zip_name"
-
-            elif [ "$commit_time" -eq "$latest_time" ] &&
+            elif [ "$commit_time" -eq "$latest_time" ] && \
                  [[ "$zip_name" > "$latest_name" ]]; then
               latest_name="$zip_name"
             fi
           done
 
           if [ -z "$latest_name" ]; then
-            echo "ERROR: Could not determine latest ZIP."
+            echo "ERROR: Could not determine latest project ZIP."
             exit 1
           fi
 
           echo "zip_name=$latest_name" >> "$GITHUB_OUTPUT"
 
+          echo ""
           echo "Using project ZIP:"
           echo "$latest_name"
+
+
+      # =========================================================
+      # VERIFY ZIP
+      # =========================================================
 
       - name: Verify project ZIP
         env:
@@ -123,17 +139,20 @@ jobs:
 
           LISTING="$(unzip -Z1 "$ZIP")"
 
-          echo "Checking required files..."
-
-          for f in "${REQUIRED[@]}"; do
-            if ! printf '%s\n' "$LISTING" | grep -Fxq "$f"; then
-              echo "ERROR: ZIP is missing required file:"
-              echo "$f"
+          for file in "${REQUIRED[@]}"; do
+            if ! printf '%s\n' "$LISTING" | grep -Fxq "$file"; then
+              echo "ERROR: ZIP is missing:"
+              echo "$file"
               exit 1
             fi
           done
 
           echo "Project ZIP verification PASSED."
+
+
+      # =========================================================
+      # EXTRACT
+      # =========================================================
 
       - name: Extract project ZIP
         env:
@@ -153,6 +172,11 @@ jobs:
 
           echo "Project extracted successfully."
 
+
+      # =========================================================
+      # VALIDATE FIREBASE
+      # =========================================================
+
       - name: Validate Firebase Android identity
         working-directory: extracted
         shell: bash
@@ -165,9 +189,9 @@ jobs:
 
           path = Path("firebase/google-services.json")
 
-          if not path.exists():
+          if not path.is_file():
               raise SystemExit(
-                  "ERROR: firebase/google-services.json is missing"
+                  "ERROR: firebase/google-services.json is missing."
               )
 
           data = json.loads(path.read_text())
@@ -179,68 +203,73 @@ jobs:
               "edd1b09ea64992d071e138"
           )
 
-          clients = data.get("client", [])
+          clients = data.get("client")
 
-          if not clients:
+          if not isinstance(clients, list) or not clients:
               raise SystemExit(
                   "ERROR: No Firebase client entries found."
               )
 
-          matching_client = None
+          matched = False
 
           for client in clients:
-              package_name = (
-                  client
-                  .get("client_info", {})
-                  .get("android_client_info", {})
-                  .get("package_name")
+
+              client_info = client.get("client_info", {})
+
+              android_info = client_info.get(
+                  "android_client_info", {}
+              )
+
+              package_name = android_info.get(
+                  "package_name"
               )
 
               print(
-                  "Found Firebase client package:",
+                  "Firebase client:",
                   package_name
               )
 
-              if package_name == expected_package:
-                  matching_client = client
-                  break
+              if package_name != expected_package:
+                  continue
 
-          if matching_client is None:
+              matched = True
+
+              app_id = client_info.get(
+                  "mobilesdk_app_id"
+              )
+
+              if not app_id:
+                  raise SystemExit(
+                      "ERROR: Matching Firebase Android "
+                      "client has no "
+                      "client_info.mobilesdk_app_id."
+                  )
+
+              if app_id != expected_app_id:
+                  raise SystemExit(
+                      "ERROR: Firebase App ID mismatch.\n"
+                      f"Expected: {expected_app_id}\n"
+                      f"Found:    {app_id}"
+                  )
+
+              print("")
+              print("Firebase package:", package_name)
+              print("Firebase App ID:", app_id)
+              print("Firebase identity PASSED.")
+
+              break
+
+          if not matched:
               raise SystemExit(
                   "ERROR: Firebase Android package "
                   f"{expected_package} was not found."
               )
-
-          app_id = matching_client.get(
-              "mobilesdk_app_id"
-          )
-
-          if not app_id:
-              raise SystemExit(
-                  "ERROR: Matching Firebase Android client "
-                  "has no mobilesdk_app_id."
-              )
-
-          if app_id != expected_app_id:
-              raise SystemExit(
-                  "ERROR: Wrong Firebase Android App ID.\n"
-                  f"Expected: {expected_app_id}\n"
-                  f"Found:    {app_id}"
-              )
-
-          print("")
-          print(
-              "Firebase Android package:",
-              expected_package
-          )
-
-          print(
-              "Firebase Android App ID:",
-              app_id
-          )
-
-          print("Firebase identity PASSED.")
           PY
+
+
+      # =========================================================
+      # NODE
+      # =========================================================
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -248,22 +277,24 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
 
+
+      # =========================================================
+      # JAVA 21
+      # =========================================================
+
       - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Verify Java 21
+
+      - name: Verify Java
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Java:"
           java -version
-
-          echo ""
-          echo "Javac:"
           javac -version
 
           JAVA_MAJOR="$(
@@ -273,15 +304,24 @@ jobs:
           )"
 
           if [ "$JAVA_MAJOR" != "21" ]; then
-            echo "ERROR: Java 21 is required."
-            echo "Detected Java: $JAVA_MAJOR"
+            echo "ERROR: Java 21 required."
             exit 1
           fi
 
           echo "Java 21 validation PASSED."
 
+
+      # =========================================================
+      # ANDROID SDK
+      # =========================================================
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+
+      # =========================================================
+      # VALIDATE PACKAGE
+      # =========================================================
 
       - name: Validate npm project
         working-directory: extracted
@@ -289,35 +329,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          node - <<'NODE'
-          const fs = require('fs');
+          node -e "
+            const p = require('./package.json');
 
-          const p = JSON.parse(
-            fs.readFileSync('./package.json', 'utf8')
-          );
+            const required = [
+              ['dependencies', '@capacitor/core'],
+              ['dependencies', '@capacitor/haptics'],
+              ['dependencies', '@capacitor/local-notifications'],
+              ['dependencies', '@capacitor-firebase/authentication'],
+              ['devDependencies', '@capacitor/cli'],
+              ['devDependencies', '@capacitor/android']
+            ];
 
-          const required = [
-            ['dependencies', '@capacitor/core'],
-            ['dependencies', '@capacitor/haptics'],
-            ['dependencies', '@capacitor/local-notifications'],
-            ['dependencies', '@capacitor-firebase/authentication'],
-            ['devDependencies', '@capacitor/cli'],
-            ['devDependencies', '@capacitor/android']
-          ];
-
-          for (const [group, name] of required) {
-            if (!p[group] || !p[group][name]) {
-              console.error(
-                `Missing ${group}.${name}`
-              );
-              process.exit(1);
+            for (const [group, name] of required) {
+              if (!p[group] || !p[group][name]) {
+                console.error('Missing ' + group + '.' + name);
+                process.exit(1);
+              }
             }
-          }
 
-          console.log(
-            'package.json validation PASSED.'
-          );
-          NODE
+            console.log('package.json validation PASSED.');
+          "
+
+
+      # =========================================================
+      # NPM
+      # =========================================================
 
       - name: Install npm dependencies
         working-directory: extracted
@@ -330,12 +367,20 @@ jobs:
             --no-fund \
             --no-progress
 
+
+      # =========================================================
+      # NATIVE GOOGLE AUTH
+      # =========================================================
+
       - name: Enable native Google Sign-In
         shell: bash
         run: |
           echo "JEE_NATIVE_GOOGLE_AUTH=1" >> "$GITHUB_ENV"
 
-          echo "Native Google Sign-In enabled."
+
+      # =========================================================
+      # CAPACITOR ANDROID
+      # =========================================================
 
       - name: Add Capacitor Android
         working-directory: extracted
@@ -347,6 +392,11 @@ jobs:
 
           npx cap add android
 
+
+      # =========================================================
+      # WIDGETS
+      # =========================================================
+
       - name: Apply native Android widgets
         working-directory: extracted
         shell: bash
@@ -355,7 +405,10 @@ jobs:
 
           python3 native-android/apply-widgets.py
 
-          echo "Native Android widgets applied."
+
+      # =========================================================
+      # FIREBASE ANDROID CONFIG
+      # =========================================================
 
       - name: Configure Firebase Android
         working-directory: extracted
@@ -371,9 +424,14 @@ jobs:
 
           test -s android/app/google-services.json
 
-          echo "Firebase configuration copied."
+          echo "Firebase google-services.json installed."
 
-      - name: Configure Firebase Gradle integration
+
+      # =========================================================
+      # FIREBASE GRADLE INTEGRATION
+      # =========================================================
+
+      - name: Configure Firebase Android Gradle integration
         working-directory: extracted
         shell: bash
         run: |
@@ -382,123 +440,148 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          variables = Path("android/variables.gradle")
-          root_gradle = Path("android/build.gradle")
-          app_gradle = Path("android/app/build.gradle")
+          root = Path("android")
 
-          # -----------------------------------------------------
+          app = root / "app" / "build.gradle"
+          project = root / "build.gradle"
+          variables = root / "variables.gradle"
+
+          # -------------------------------------------------------
           # variables.gradle
-          # -----------------------------------------------------
+          # -------------------------------------------------------
 
-          text = variables.read_text()
+          if variables.exists():
 
-          if "rgcfaIncludeGoogle" not in text:
+              text = variables.read_text()
 
-              if "ext {" in text:
+              if "rgcfaIncludeGoogle" not in text:
+
+                  if "ext {" in text:
+
+                      text = text.replace(
+                          "ext {",
+                          "ext {\n"
+                          "    rgcfaIncludeGoogle = true\n"
+                          "    androidxCredentialsVersion = '1.3.0'",
+                          1
+                      )
+
+                  else:
+
+                      text += (
+                          "\n"
+                          "ext {\n"
+                          "    rgcfaIncludeGoogle = true\n"
+                          "    androidxCredentialsVersion = '1.3.0'\n"
+                          "}\n"
+                      )
+
+              else:
+
+                  lines = text.splitlines()
+                  updated = []
+
+                  for line in lines:
+
+                      if "rgcfaIncludeGoogle" in line:
+
+                          indent = line[
+                              :len(line) - len(line.lstrip())
+                          ]
+
+                          updated.append(
+                              indent +
+                              "rgcfaIncludeGoogle = true"
+                          )
+
+                      else:
+
+                          updated.append(line)
+
+                  text = "\n".join(updated) + "\n"
+
+                  if "androidxCredentialsVersion" not in text:
+
+                      text = text.replace(
+                          "rgcfaIncludeGoogle = true",
+                          "rgcfaIncludeGoogle = true\n"
+                          "    androidxCredentialsVersion = '1.3.0'",
+                          1
+                      )
+
+              variables.write_text(text)
+
+          # -------------------------------------------------------
+          # project build.gradle
+          # -------------------------------------------------------
+
+          text = project.read_text()
+
+          if "com.google.gms.google-services" not in text:
+
+              if text.lstrip().startswith("plugins {"):
+
                   text = text.replace(
-                      "ext {",
-                      "ext {\n"
-                      "    rgcfaIncludeGoogle = true\n"
-                      "    androidxCredentialsVersion = '1.3.0'",
+                      "plugins {",
+                      "plugins {\n"
+                      "    id 'com.google.gms.google-services' "
+                      "version '4.5.0' apply false",
                       1
                   )
 
               else:
-                  text += (
-                      "\n"
-                      "ext {\n"
-                      "    rgcfaIncludeGoogle = true\n"
-                      "    androidxCredentialsVersion = '1.3.0'\n"
-                      "}\n"
+
+                  prefix = (
+                      "buildscript {\n"
+                      "    repositories {\n"
+                      "        google()\n"
+                      "        mavenCentral()\n"
+                      "    }\n"
+                      "    dependencies {\n"
+                      "        classpath "
+                      "'com.google.gms:google-services:4.5.0'\n"
+                      "    }\n"
+                      "}\n\n"
                   )
 
-          else:
+                  text = prefix + text
 
-              lines = text.splitlines()
-              output = []
+              project.write_text(text)
 
-              for line in lines:
-                  if "rgcfaIncludeGoogle" in line:
-                      indent = line[
-                          :len(line) - len(line.lstrip())
-                      ]
+          # -------------------------------------------------------
+          # app build.gradle
+          # -------------------------------------------------------
 
-                      output.append(
-                          indent +
-                          "rgcfaIncludeGoogle = true"
-                      )
-                  else:
-                      output.append(line)
+          text = app.read_text()
 
-              text = "\n".join(output) + "\n"
+          if "com.google.gms.google-services" not in text:
 
-              if (
-                  "androidxCredentialsVersion"
-                  not in text
-              ):
+              if text.lstrip().startswith("plugins {"):
+
                   text = text.replace(
-                      "rgcfaIncludeGoogle = true",
-                      "rgcfaIncludeGoogle = true\n"
-                      "    androidxCredentialsVersion = '1.3.0'",
+                      "plugins {",
+                      "plugins {\n"
+                      "    id 'com.google.gms.google-services'",
                       1
                   )
 
-          variables.write_text(text)
+              else:
 
-          # -----------------------------------------------------
-          # Root build.gradle
-          # -----------------------------------------------------
-
-          text = root_gradle.read_text()
-
-          if "com.google.gms:google-services" not in text:
-
-              marker = "dependencies {"
-              position = text.find(marker)
-
-              if position == -1:
-                  raise SystemExit(
-                      "ERROR: Could not find "
-                      "buildscript dependencies in "
-                      "android/build.gradle"
+                  text += (
+                      "\n"
+                      "apply plugin: "
+                      "'com.google.gms.google-services'\n"
                   )
 
-              insert_position = (
-                  position + len(marker)
-              )
+              app.write_text(text)
 
-              text = (
-                  text[:insert_position]
-                  + "\n"
-                  + "        classpath "
-                  + "'com.google.gms:google-services:4.5.0'"
-                  + text[insert_position:]
-              )
-
-          root_gradle.write_text(text)
-
-          # -----------------------------------------------------
-          # App build.gradle
-          # -----------------------------------------------------
-
-          text = app_gradle.read_text()
-
-          if (
-              "com.google.gms.google-services"
-              not in text
-          ):
-              text += (
-                  "\n\n"
-                  "apply plugin: "
-                  "'com.google.gms.google-services'\n"
-              )
-
-          app_gradle.write_text(text)
-
-          print(
-              "Firebase Gradle integration configured."
-          )
+          print("Firebase Gradle integration configured.")
           PY
+
+
+      # =========================================================
+      # CAPACITOR SYNC
+      # =========================================================
 
       - name: Sync Capacitor
         working-directory: extracted
@@ -508,19 +591,21 @@ jobs:
 
           npx cap sync android
 
+
+      # =========================================================
+      # DEBUG KEYSTORE
+      # =========================================================
+
       - name: Prepare Android debug keystore
         shell: bash
         run: |
           set -euo pipefail
 
-          ANDROID_DIR="$HOME/.android"
-          KEYSTORE="$ANDROID_DIR/debug.keystore"
+          KEYSTORE="$HOME/.android/debug.keystore"
 
-          mkdir -p "$ANDROID_DIR"
+          mkdir -p "$HOME/.android"
 
           if [ ! -f "$KEYSTORE" ]; then
-
-            echo "Creating debug keystore..."
 
             keytool \
               -genkeypair \
@@ -532,18 +617,18 @@ jobs:
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
-              -dname \
-              "CN=Android Debug,O=Android,C=US"
-
-          else
-
-            echo "Existing debug keystore found."
+              -dname "CN=Android Debug,O=Android,C=US"
 
           fi
 
           test -f "$KEYSTORE"
 
           echo "Debug keystore ready."
+
+
+      # =========================================================
+      # VERIFY GENERATED PROJECT
+      # =========================================================
 
       - name: Verify generated Android project
         working-directory: extracted
@@ -571,14 +656,16 @@ jobs:
             "com.google.gms.google-services" \
             android/app/build.gradle
 
-          grep -q \
-            "com.google.gms:google-services:4.5.0" \
-            android/build.gradle
-
           echo "Generated Android project validation PASSED."
+
+
+      # =========================================================
+      # GRADLE
+      # =========================================================
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
+
 
       - name: Show build environment
         working-directory: extracted/android
@@ -600,6 +687,11 @@ jobs:
 
           ./gradlew --version
 
+
+      # =========================================================
+      # SIGNING REPORT
+      # =========================================================
+
       - name: Generate signing report
         working-directory: extracted/android
         shell: bash
@@ -614,6 +706,11 @@ jobs:
             --info \
             2>&1 | tee ../signing-report.txt
 
+
+      # =========================================================
+      # BUILD APK
+      # =========================================================
+
       - name: Build debug APK
         working-directory: extracted/android
         shell: bash
@@ -627,6 +724,11 @@ jobs:
             --stacktrace \
             --info \
             2>&1 | tee ../gradle-build.log
+
+
+      # =========================================================
+      # VERIFY APK
+      # =========================================================
 
       - name: Verify APK
         working-directory: extracted
@@ -655,7 +757,12 @@ jobs:
 
           echo "APK verification PASSED."
 
-      - name: Upload debug APK and diagnostics
+
+      # =========================================================
+      # UPLOAD
+      # =========================================================
+
+      - name: Upload APK and diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
