@@ -5,327 +5,317 @@ on:
   push:
     branches:
       - main
+      - master
 
 permissions:
   contents: read
 
 env:
-  NODE_VERSION: "22"
-  JAVA_VERSION: "21"
-  PROJECT_ZIP: "JEE-Tracker-Android-Logo-Final.zip"
+  PROJECT_ZIP: JEE-Tracker-Android-Native-Feel-Fixed.zip
+  JAVA_VERSION: '17'
+  NODE_VERSION: '20'
 
 jobs:
-  build-debug:
-    name: Extract and build Android APK
+  build:
+    name: Build Debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
-
-      # --------------------------------------------------
-      # 1. Get repository
-      # --------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      # --------------------------------------------------
-      # 2. Setup Node
-      # --------------------------------------------------
+      - name: Verify project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "$PROJECT_ZIP"
+
+          echo "ZIP:"
+          ls -lh "$PROJECT_ZIP"
+
+          unzip -tq "$PROJECT_ZIP"
+
+          echo "ZIP integrity OK"
+
+      - name: Extract project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf project
+          mkdir -p project
+
+          unzip -q "$PROJECT_ZIP" -d project
+
+          echo "Extracted project:"
+          find project -maxdepth 2 -type f | sort | head -200
+
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: project/package-lock.json
 
-      # --------------------------------------------------
-      # 3. Setup Java
-      #
-      # IMPORTANT:
-      # No Gradle cache here.
-      # The ZIP has not been extracted yet, so Android/Gradle
-      # files do not exist at this point.
-      # --------------------------------------------------
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      # --------------------------------------------------
-      # 4. Setup Android SDK
-      # --------------------------------------------------
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # --------------------------------------------------
-      # 5. Check that the expected ZIP exists
-      # --------------------------------------------------
-      - name: Check project ZIP
+      - name: Verify Firebase configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -f "$GITHUB_WORKSPACE/$PROJECT_ZIP" ]; then
-            echo "ERROR: Project ZIP not found:"
-            echo "$GITHUB_WORKSPACE/$PROJECT_ZIP"
-            echo ""
-            echo "ZIP files actually present:"
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 3 \
-              -type f \
-              -iname "*.zip" \
-              -print
-            exit 1
-          fi
+          test -f project/firebase/google-services.json
 
-          echo "Project ZIP found:"
-          echo "$GITHUB_WORKSPACE/$PROJECT_ZIP"
+          python3 - <<'PY'
+          import json
 
-      # --------------------------------------------------
-      # 6. Verify ZIP structure BEFORE extraction
-      # --------------------------------------------------
-      - name: Verify ZIP structure
-        shell: bash
-        run: |
-          set -euo pipefail
+          p = "project/firebase/google-services.json"
 
-          ZIP="$GITHUB_WORKSPACE/$PROJECT_ZIP"
+          with open(p, "r", encoding="utf-8") as f:
+              data = json.load(f)
 
-          echo "Checking ZIP contents..."
+          project_id = data["project_info"]["project_id"]
 
-          unzip -tq "$ZIP"
+          client = data["client"][0]
+          package_name = client["client_info"]["android_client_info"]["package_name"]
+          app_id = client["client_info"]["mobilesdk_app_id"]
 
-          REQUIRED_FILES=(
-            "package.json"
-            "capacitor.config.ts"
-            "www/index.html"
-            "www/schedule.html"
-            "www/test-analysis.html"
-            "assets/icon-only.png"
-            "assets/logo.png"
-            "www/icon-192.png"
-            "www/icon-512.png"
-          )
+          print("Firebase project:", project_id)
+          print("Android package:", package_name)
+          print("Firebase app ID:", app_id)
 
-          for FILE in "${REQUIRED_FILES[@]}"; do
-            if ! unzip -Z1 "$ZIP" | grep -Fxq "$FILE"; then
-              echo "ERROR: Required file missing from ZIP:"
-              echo "$FILE"
-              exit 1
-            fi
-          done
+          assert project_id == "jee2027-9d55a"
+          assert package_name == "com.vedplayer.jeetracker"
+          assert app_id == "1:450231967529:android:edd1b09ea64992d071e138"
 
-          echo "ZIP integrity and required structure verified."
+          print("Firebase configuration OK")
+          PY
 
-      # --------------------------------------------------
-      # 7. Extract ZIP
-      # --------------------------------------------------
-      - name: Extract project ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ZIP="$GITHUB_WORKSPACE/$PROJECT_ZIP"
-          EXTRACT_DIR="$GITHUB_WORKSPACE/_extracted_project"
-
-          rm -rf "$EXTRACT_DIR"
-          mkdir -p "$EXTRACT_DIR"
-
-          echo "Extracting:"
-          echo "$ZIP"
-
-          unzip -q -o "$ZIP" -d "$EXTRACT_DIR"
-
-          echo "Extraction complete."
-
-      # --------------------------------------------------
-      # 8. Find actual project root
-      # --------------------------------------------------
-      - name: Locate extracted project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          EXTRACT_DIR="$GITHUB_WORKSPACE/_extracted_project"
-
-          PACKAGE_JSON="$(
-            find "$EXTRACT_DIR" \
-              -type f \
-              -name "package.json" \
-              -print -quit
-          )"
-
-          if [ -z "$PACKAGE_JSON" ]; then
-            echo "ERROR: package.json was not found after extraction."
-            find "$EXTRACT_DIR" -maxdepth 4 -type f | sort
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$PACKAGE_JSON")"
-
-          echo "Project root:"
-          echo "$PROJECT_DIR"
-
-          # Verify project root.
-          test -f "$PROJECT_DIR/package.json"
-          test -f "$PROJECT_DIR/capacitor.config.ts"
-          test -f "$PROJECT_DIR/www/index.html"
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      # --------------------------------------------------
-      # 9. Show extracted structure
-      # --------------------------------------------------
-      - name: Verify extracted project
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Project files:"
-          find . -maxdepth 3 -type f | sort
-
-          echo ""
-          echo "Checking required files..."
-
-          test -f package.json
-          test -f capacitor.config.ts
-
-          test -f www/index.html
-          test -f www/schedule.html
-          test -f www/test-analysis.html
-
-          test -f assets/icon-only.png
-          test -f assets/logo.png
-
-          test -f www/icon-192.png
-          test -f www/icon-512.png
-
-          echo "All required project files are present."
-
-      # --------------------------------------------------
-      # 10. Install npm dependencies
-      # --------------------------------------------------
       - name: Install npm dependencies
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: project
         shell: bash
         run: |
           set -euo pipefail
 
-          npm install --no-audit --no-fund
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
-      # --------------------------------------------------
-      # 11. Create Android project
-      # --------------------------------------------------
-      - name: Add Capacitor Android platform
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Enable native Google authentication
+        working-directory: project
         shell: bash
         run: |
           set -euo pipefail
+
+          export JEE_NATIVE_GOOGLE_AUTH=1
+
+          echo "JEE_NATIVE_GOOGLE_AUTH=$JEE_NATIVE_GOOGLE_AUTH"
+
+      - name: Build web application
+        working-directory: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if npm run | grep -q "build"; then
+            npm run build
+          else
+            echo "No npm build script found; using existing www directory."
+          fi
+
+          test -d www
+          test -f www/index.html
+
+      - name: Prepare Capacitor
+        working-directory: project
+        shell: bash
+        env:
+          JEE_NATIVE_GOOGLE_AUTH: '1'
+        run: |
+          set -euo pipefail
+
+          rm -rf android
 
           npx cap add android
 
-      # --------------------------------------------------
-      # 12. Generate Android icons from supplied logo
-      # --------------------------------------------------
-      - name: Generate Android app icons
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Install Firebase configuration
+        working-directory: project
         shell: bash
         run: |
           set -euo pipefail
 
-          npx @capacitor/assets@3.0.5 generate \
-            --android \
-            --assetPath assets \
-            --iconBackgroundColor "#65001f" \
-            --iconBackgroundColorDark "#65001f"
+          mkdir -p android/app
 
-      # --------------------------------------------------
-      # 13. Sync web project into Android
-      # --------------------------------------------------
-      - name: Sync Capacitor Android project
-        working-directory: ${{ env.PROJECT_DIR }}
+          cp firebase/google-services.json \
+             android/app/google-services.json
+
+          test -f android/app/google-services.json
+
+      - name: Configure Firebase Android Gradle plugin
+        working-directory: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("android/build.gradle")
+          app = Path("android/app/build.gradle")
+
+          root_text = root.read_text()
+
+          if "com.google.gms:google-services" not in root_text:
+              root_text += """
+          dependencies {
+              classpath 'com.google.gms:google-services:4.5.0'
+          }
+          """
+
+          root.write_text(root_text)
+
+          app_text = app.read_text()
+
+          if "com.google.gms.google-services" not in app_text:
+              app_text += """
+
+          apply plugin: 'com.google.gms.google-services'
+          """
+
+          app.write_text(app_text)
+          PY
+
+      - name: Configure Capacitor Firebase Authentication
+        working-directory: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f capacitor.config.ts
+
+          grep -q "FirebaseAuthentication" capacitor.config.ts
+          grep -q "google.com" capacitor.config.ts
+
+          echo "Native Firebase Authentication configuration found."
+
+      - name: Apply Android native widgets
+        working-directory: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f native-android/apply-widgets.py ]; then
+            python3 native-android/apply-widgets.py
+          else
+            echo "Widget patch script not found; continuing."
+          fi
+
+      - name: Verify native touch layer
+        working-directory: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f www/native-touch.css
+
+          grep -q "native-android" www/native-touch.css
+
+          echo "Native Android touch layer found."
+
+      - name: Sync Capacitor
+        working-directory: project
         shell: bash
         run: |
           set -euo pipefail
 
           npx cap sync android
 
-      # --------------------------------------------------
-      # 14. Verify Android project NOW
-      # --------------------------------------------------
-      - name: Verify Android project
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Verify Firebase package and app ID
+        working-directory: project
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f android/gradlew
-          test -f android/settings.gradle
-          test -f android/app/build.gradle
+          grep -R "com.vedplayer.jeetracker" android/app \
+            --include="*.gradle" \
+            --include="*.xml" \
+            --include="*.json" \
+            | head -50
 
-          echo "Android project successfully generated."
+          grep -R "1:450231967529:android:edd1b09ea64992d071e138" android \
+            --include="google-services.json"
 
-          echo ""
-          echo "Gradle files:"
-          find android -maxdepth 3 \
-            \( -name "*.gradle" -o -name "*.gradle.kts" -o -name "gradle-wrapper.properties" \) \
-            -print | sort
+          echo "Firebase Android identifiers verified."
 
-      # --------------------------------------------------
-      # 15. Setup Gradle AFTER extraction and cap add
-      #
-      # This is intentionally here.
-      # Gradle files now exist.
-      # --------------------------------------------------
+      - name: Generate signing report
+        working-directory: project/android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew signingReport
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # --------------------------------------------------
-      # 16. Build APK
-      # --------------------------------------------------
       - name: Build debug APK
-        working-directory: ${{ env.PROJECT_DIR }}/android
+        working-directory: project/android
         shell: bash
         run: |
           set -euo pipefail
 
-          chmod +x gradlew
+          ./gradlew clean assembleDebug --stacktrace
 
-          ./gradlew assembleDebug \
-            --no-daemon \
-            --stacktrace
-
-      # --------------------------------------------------
-      # 17. Verify APK
-      # --------------------------------------------------
       - name: Verify APK
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: project
         shell: bash
         run: |
           set -euo pipefail
 
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
 
-          if [ ! -s "$APK" ]; then
-            echo "ERROR: APK was not created."
-            exit 1
-          fi
+          test -f "$APK"
 
-          echo "APK successfully created:"
+          echo "APK created:"
           ls -lh "$APK"
 
-          echo ""
-          echo "APK SHA-256:"
-          sha256sum "$APK" | tee app-debug.apk.sha256
+          sha256sum "$APK" | tee apk-sha256.txt
 
-      # --------------------------------------------------
-      # 18. Upload APK
-      # --------------------------------------------------
+      - name: Collect build files
+        working-directory: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p ../apk-output
+
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             ../apk-output/JEE-Tracker-debug.apk
+
+          cp apk-sha256.txt \
+             ../apk-output/
+
+          if [ -f android/app/build/outputs/apk/debug/output-metadata.json ]; then
+            cp android/app/build/outputs/apk/debug/output-metadata.json \
+               ../apk-output/
+          fi
+
+          echo "Final artifacts:"
+          ls -lh ../apk-output
+
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: jee-tracker-debug-apk
-          path: |
-            ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
-            ${{ env.PROJECT_DIR }}/app-debug.apk.sha256
+          name: JEE-Tracker-debug-apk
+          path: apk-output/
           if-no-files-found: error
