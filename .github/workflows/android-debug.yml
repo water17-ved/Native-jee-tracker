@@ -3,63 +3,119 @@ name: Build JEE Tracker Android APK
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [main]
 
 permissions:
   contents: read
 
 env:
-  PROJECT_ZIP: JEE-Tracker-Android-Native-Feel-Fixed.zip
-  JAVA_VERSION: '17'
   NODE_VERSION: '20'
+  JAVA_VERSION: '17'
+  PROJECT_ZIP: 'JEE-Tracker-Android-Native-Feel-Fixed-v2.zip'
 
 jobs:
-  build:
-    name: Build Debug APK
+  build-debug:
+    name: Extract, configure native features and build debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Verify project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f "$PROJECT_ZIP"
+          ZIP="$GITHUB_WORKSPACE/$PROJECT_ZIP"
 
-          echo "ZIP:"
-          ls -lh "$PROJECT_ZIP"
+          test -f "$ZIP"
 
-          unzip -tq "$PROJECT_ZIP"
+          echo "Checking ZIP integrity..."
+          unzip -tq "$ZIP"
 
-          echo "ZIP integrity OK"
+          echo "Checking required project files..."
 
-      - name: Extract project
+          for f in \
+            package.json \
+            capacitor.config.ts \
+            tsconfig.json \
+            www/index.html \
+            www/schedule.html \
+            www/test-analysis.html \
+            www/jee-android-native.js \
+            www/jee-widgets.js \
+            www/native-touch.css \
+            native-android/apply-widgets.py \
+            native-android/app/src/main/java/com/vedplayer/jeetracker/JeeWidgetsPlugin.java \
+            native-android/app/src/main/java/com/vedplayer/jeetracker/JeeWidgetProvider.java \
+            native-android/app/src/main/java/com/vedplayer/jeetracker/JeeMarksWidgetProvider.java \
+            native-android/app/src/main/java/com/vedplayer/jeetracker/JeeFocusWidgetProvider.java \
+            firebase/google-services.json \
+            assets/icon-only.png \
+            assets/logo.png \
+            www/icon-192.png \
+            www/icon-512.png
+          do
+            unzip -Z1 "$ZIP" | grep -Fxq "$f" || {
+              echo "ERROR: missing $f"
+              exit 1
+            }
+          done
+
+          echo "ZIP verification PASSED."
+
+      - name: Extract project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf project
-          mkdir -p project
+          rm -rf extracted
+          mkdir -p extracted
 
-          unzip -q "$PROJECT_ZIP" -d project
+          unzip -q -o "$GITHUB_WORKSPACE/$PROJECT_ZIP" -d extracted
 
-          echo "Extracted project:"
-          find project -maxdepth 2 -type f | sort | head -200
+          test -f extracted/package.json
+
+          echo "Project extracted successfully."
+
+      - name: Validate Firebase Android identity
+        working-directory: extracted
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+
+          with open("firebase/google-services.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          client = data["client"][0]
+
+          package_name = client["client_info"]["android_client_info"]["package_name"]
+          app_id = client["client_info"]["mobilesdk_app_id"]
+
+          print("Firebase package:", package_name)
+          print("Firebase app ID:", app_id)
+
+          assert package_name == "com.vedplayer.jeetracker"
+          assert app_id == "1:450231967529:android:edd1b09ea64992d071e138"
+
+          print("Firebase identity PASSED.")
+          PY
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: project/package-lock.json
+          package-manager-cache: false
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
@@ -67,80 +123,43 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Verify Firebase configuration
+      - name: Validate npm project
+        working-directory: extracted
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f project/firebase/google-services.json
+          test -f package.json
 
-          python3 - <<'PY'
-          import json
-
-          p = "project/firebase/google-services.json"
-
-          with open(p, "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          project_id = data["project_info"]["project_id"]
-
-          client = data["client"][0]
-          package_name = client["client_info"]["android_client_info"]["package_name"]
-          app_id = client["client_info"]["mobilesdk_app_id"]
-
-          print("Firebase project:", project_id)
-          print("Android package:", package_name)
-          print("Firebase app ID:", app_id)
-
-          assert project_id == "jee2027-9d55a"
-          assert package_name == "com.vedplayer.jeetracker"
-          assert app_id == "1:450231967529:android:edd1b09ea64992d071e138"
-
-          print("Firebase configuration OK")
-          PY
+          node -e "
+            const p = require('./package.json');
+            if (!p.dependencies?.['@capacitor/core']) process.exit(1);
+            if (!p.devDependencies?.['@capacitor/android']) process.exit(1);
+            if (!p.devDependencies?.['@capacitor/cli']) process.exit(1);
+            console.log('package.json OK');
+          "
 
       - name: Install npm dependencies
-        working-directory: project
+        working-directory: extracted
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+          npm install --no-audit --no-fund --no-progress
 
-      - name: Enable native Google authentication
-        working-directory: project
+      - name: Enable native Google Sign-In
+        working-directory: extracted
         shell: bash
         run: |
           set -euo pipefail
 
-          export JEE_NATIVE_GOOGLE_AUTH=1
+          test -s firebase/google-services.json
 
-          echo "JEE_NATIVE_GOOGLE_AUTH=$JEE_NATIVE_GOOGLE_AUTH"
+          echo "JEE_NATIVE_GOOGLE_AUTH=1" >> "$GITHUB_ENV"
 
-      - name: Build web application
-        working-directory: project
+      - name: Add Capacitor Android platform
+        working-directory: extracted
         shell: bash
-        run: |
-          set -euo pipefail
-
-          if npm run | grep -q "build"; then
-            npm run build
-          else
-            echo "No npm build script found; using existing www directory."
-          fi
-
-          test -d www
-          test -f www/index.html
-
-      - name: Prepare Capacitor
-        working-directory: project
-        shell: bash
-        env:
-          JEE_NATIVE_GOOGLE_AUTH: '1'
         run: |
           set -euo pipefail
 
@@ -148,8 +167,16 @@ jobs:
 
           npx cap add android
 
-      - name: Install Firebase configuration
-        working-directory: project
+      - name: Apply native Android widgets
+        working-directory: extracted
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 native-android/apply-widgets.py
+
+      - name: Configure Firebase Android
+        working-directory: extracted
         shell: bash
         run: |
           set -euo pipefail
@@ -159,125 +186,152 @@ jobs:
           cp firebase/google-services.json \
              android/app/google-services.json
 
-          test -f android/app/google-services.json
-
-      - name: Configure Firebase Android Gradle plugin
-        working-directory: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
           python3 - <<'PY'
           from pathlib import Path
 
-          root = Path("android/build.gradle")
-          app = Path("android/app/build.gradle")
+          root = Path("android")
+          app = root / "app" / "build.gradle"
+          rg = root / "build.gradle"
+          vg = root / "variables.gradle"
 
-          root_text = root.read_text()
+          # Firebase Authentication native Google support
+          if vg.exists():
+              text = vg.read_text()
 
-          if "com.google.gms:google-services" not in root_text:
-              root_text += """
-          dependencies {
-              classpath 'com.google.gms:google-services:4.5.0'
-          }
-          """
+              if "rgcfaIncludeGoogle" not in text:
+                  text = text.replace(
+                      "ext {",
+                      "ext {\n"
+                      "    rgcfaIncludeGoogle = true\n"
+                      "    androidxCredentialsVersion = '1.3.0'",
+                      1
+                  )
 
-          root.write_text(root_text)
+                  vg.write_text(text)
 
-          app_text = app.read_text()
+          # Google Services Gradle plugin
+          text = rg.read_text()
 
-          if "com.google.gms.google-services" not in app_text:
-              app_text += """
+          if "com.google.gms.google-services" not in text:
+              if text.lstrip().startswith("plugins {"):
+                  text = text.replace(
+                      "plugins {",
+                      "plugins {\n"
+                      "    id 'com.google.gms.google-services' version '4.5.0' apply false",
+                      1
+                  )
+              else:
+                  text = (
+                      "buildscript {\n"
+                      "    repositories {\n"
+                      "        google()\n"
+                      "        mavenCentral()\n"
+                      "    }\n"
+                      "    dependencies {\n"
+                      "        classpath 'com.google.gms:google-services:4.5.0'\n"
+                      "    }\n"
+                      "}\n\n"
+                      + text
+                  )
 
-          apply plugin: 'com.google.gms.google-services'
-          """
+              rg.write_text(text)
 
-          app.write_text(app_text)
+          # Apply plugin to app module
+          text = app.read_text()
+
+          if "com.google.gms.google-services" not in text:
+              if text.lstrip().startswith("plugins {"):
+                  text = text.replace(
+                      "plugins {",
+                      "plugins {\n"
+                      "    id 'com.google.gms.google-services'",
+                      1
+                  )
+              else:
+                  text += "\napply plugin: 'com.google.gms.google-services'\n"
+
+              app.write_text(text)
           PY
 
-      - name: Configure Capacitor Firebase Authentication
-        working-directory: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f capacitor.config.ts
-
-          grep -q "FirebaseAuthentication" capacitor.config.ts
-          grep -q "google.com" capacitor.config.ts
-
-          echo "Native Firebase Authentication configuration found."
-
-      - name: Apply Android native widgets
-        working-directory: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -f native-android/apply-widgets.py ]; then
-            python3 native-android/apply-widgets.py
-          else
-            echo "Widget patch script not found; continuing."
-          fi
-
-      - name: Verify native touch layer
-        working-directory: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f www/native-touch.css
-
-          grep -q "native-android" www/native-touch.css
-
-          echo "Native Android touch layer found."
-
       - name: Sync Capacitor
-        working-directory: project
+        working-directory: extracted
         shell: bash
         run: |
           set -euo pipefail
 
           npx cap sync android
 
-      - name: Verify Firebase package and app ID
-        working-directory: project
+      - name: Verify native Android integration
+        working-directory: extracted
         shell: bash
         run: |
           set -euo pipefail
 
-          grep -R "com.vedplayer.jeetracker" android/app \
+          test -f android/app/google-services.json
+
+          grep -q "rgcfaIncludeGoogle" android/variables.gradle
+          grep -q "androidxCredentialsVersion" android/variables.gradle
+
+          grep -R -q \
+            "com.google.gms.google-services" \
+            android \
             --include="*.gradle" \
-            --include="*.xml" \
-            --include="*.json" \
-            | head -50
+            --include="*.gradle.kts"
 
-          grep -R "1:450231967529:android:edd1b09ea64992d071e138" android \
-            --include="google-services.json"
+          grep -q \
+            "JeeWidgetProvider" \
+            android/app/src/main/AndroidManifest.xml
 
-          echo "Firebase Android identifiers verified."
+          grep -q \
+            "JeeMarksWidgetProvider" \
+            android/app/src/main/AndroidManifest.xml
 
-      - name: Generate signing report
-        working-directory: project/android
-        shell: bash
-        run: |
-          set -euo pipefail
+          grep -q \
+            "JeeFocusWidgetProvider" \
+            android/app/src/main/AndroidManifest.xml
 
-          ./gradlew signingReport
+          grep -q \
+            "const _authDomain = 'jee2027-9d55a.firebaseapp.com'" \
+            www/index.html
+
+          grep -q \
+            "JEEAndroidNotifications.*notify" \
+            www/jee-android-native.js
+
+          echo "Native Android integration PASSED."
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Build debug APK
-        working-directory: project/android
+      - name: Generate Firebase debug SHA-1 report
+        working-directory: extracted/android
         shell: bash
         run: |
           set -euo pipefail
 
-          ./gradlew clean assembleDebug --stacktrace
+          chmod +x gradlew
+
+          ./gradlew signingReport --no-daemon \
+            > ../signing-report.txt 2>&1
+
+          grep -E "SHA1:|SHA-1:" \
+            ../signing-report.txt
+
+      - name: Build debug APK
+        working-directory: extracted/android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x gradlew
+
+          ./gradlew \
+            assembleDebug \
+            --no-daemon \
+            --stacktrace
 
       - name: Verify APK
-        working-directory: project
+        working-directory: extracted
         shell: bash
         run: |
           set -euo pipefail
@@ -285,37 +339,26 @@ jobs:
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
 
           test -f "$APK"
+          test -s "$APK"
 
-          echo "APK created:"
-          ls -lh "$APK"
+          SIZE=$(stat -c%s "$APK")
 
-          sha256sum "$APK" | tee apk-sha256.txt
+          echo "APK size: $SIZE bytes"
 
-      - name: Collect build files
-        working-directory: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p ../apk-output
-
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
-             ../apk-output/JEE-Tracker-debug.apk
-
-          cp apk-sha256.txt \
-             ../apk-output/
-
-          if [ -f android/app/build/outputs/apk/debug/output-metadata.json ]; then
-            cp android/app/build/outputs/apk/debug/output-metadata.json \
-               ../apk-output/
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "ERROR: APK is suspiciously small."
+            exit 1
           fi
 
-          echo "Final artifacts:"
-          ls -lh ../apk-output
+          sha256sum "$APK" | tee app-debug.apk.sha256
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v6
+      - name: Upload APK and reports
+        uses: actions/upload-artifact@v4
         with:
-          name: JEE-Tracker-debug-apk
-          path: apk-output/
+          name: JEE-Tracker-debug-APK-final
+          path: |
+            extracted/android/app/build/outputs/apk/debug/app-debug.apk
+            extracted/app-debug.apk.sha256
+            extracted/signing-report.txt
           if-no-files-found: error
+          retention-days: 30
