@@ -1,132 +1,256 @@
-name: JEE Tracker Android APK
+name: Build JEE Tracker Debug APK
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build JEE Tracker APK
+    name: Extract and Build Debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
+
+      # --------------------------------------------------
       # 1. Checkout repository
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
 
-      # 2. Extract the supplied Android project package
-      - name: Extract Android project
+
+      # --------------------------------------------------
+      # 2. Find ZIP
+      # --------------------------------------------------
+      - name: Find project ZIP
         shell: bash
         run: |
           set -e
 
-          ZIP="JEE-Tracker-Android-Firebase-Updated-Safe.zip"
+          echo "Repository contents:"
+          find . -maxdepth 2 -type f | sort
 
-          if [ ! -f "$ZIP" ]; then
-            echo "ERROR: $ZIP was not found."
+          ZIP=$(find . -maxdepth 2 -type f \
+            -name "*.zip" \
+            | head -n 1)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: No ZIP file found."
             exit 1
           fi
+
+          echo "ZIP found:"
+          echo "$ZIP"
+
+          echo "ZIP_PATH=$ZIP" >> "$GITHUB_ENV"
+
+
+      # --------------------------------------------------
+      # 3. Extract ZIP
+      # --------------------------------------------------
+      - name: Extract project ZIP
+        shell: bash
+        run: |
+          set -e
 
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q "$ZIP" -d extracted
+          unzip -q -o "$ZIP_PATH" -d extracted
 
-          echo "Extracted project:"
-          find extracted -maxdepth 3 -type f | sort
+          echo ""
+          echo "Extracted files:"
+          find extracted -maxdepth 4 -type f | sort
 
-      # 3. Copy the actual application source
-      - name: Prepare project files
+
+      # --------------------------------------------------
+      # 4. Detect actual project root
+      # --------------------------------------------------
+      - name: Detect project root
         shell: bash
         run: |
           set -e
 
-          cp -a extracted/www .
-          cp -a extracted/package.json .
-          cp -a extracted/capacitor.config.ts .
-          cp -a extracted/tsconfig.json .
-          cp -a extracted/native-android .
-          cp -a extracted/firebase .
+          echo "Searching for project..."
 
-      # 4. Verify the important source files
-      - name: Verify project structure
+          if [ -f "extracted/finalzip/package.json" ]; then
+            PROJECT_ROOT="extracted/finalzip"
+
+          elif [ -f "extracted/package.json" ]; then
+            PROJECT_ROOT="extracted"
+
+          else
+            PROJECT_ROOT=$(find extracted \
+              -mindepth 1 \
+              -maxdepth 3 \
+              -type f \
+              -name "package.json" \
+              -printf '%h\n' \
+              | head -n 1)
+
+          fi
+
+          if [ -z "$PROJECT_ROOT" ] || [ ! -f "$PROJECT_ROOT/package.json" ]; then
+            echo "ERROR: Could not find project root."
+            echo ""
+            echo "Extracted structure:"
+            find extracted -maxdepth 5 -print | sort
+            exit 1
+          fi
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "======================================"
+          echo "PROJECT ROOT"
+          echo "======================================"
+          echo "$PROJECT_ROOT"
+
+
+      # --------------------------------------------------
+      # 5. Verify source
+      # --------------------------------------------------
+      - name: Verify source project
         shell: bash
         run: |
           set -e
 
-          echo "Checking required files..."
+          PROJECT="$PROJECT_ROOT"
 
-          test -f www/index.html
-          test -f www/schedule.html
-          test -f www/test-analysis.html
+          test -f "$PROJECT/package.json"
+          test -f "$PROJECT/capacitor.config.ts"
+          test -f "$PROJECT/tsconfig.json"
 
-          test -f www/ai-file-reader.js
-          test -f www/jee-native-files.js
-          test -f www/jee-native-storage.js
-          test -f www/jee-ai-android.js
-          test -f www/jee-android-native.js
-          test -f www/jee-android-hardening.js
-          test -f www/jee-capacitor-bridge.js
-          test -f www/jee-network-status.js
+          test -f "$PROJECT/www/index.html"
+          test -f "$PROJECT/www/schedule.html"
+          test -f "$PROJECT/www/test-analysis.html"
 
-          test -f package.json
-          test -f capacitor.config.ts
-          test -f tsconfig.json
+          test -f "$PROJECT/firebase/google-services.json"
 
-          test -f native-android/apply-widgets.py
+          test -f "$PROJECT/native-android/apply-widgets.py"
 
-          test -f firebase/google-services.json
+          echo ""
+          echo "======================================"
+          echo "SOURCE VERIFICATION PASSED"
+          echo "======================================"
 
-          echo "Project structure verified successfully."
 
-      # 5. Set up Node
+      # --------------------------------------------------
+      # 6. Prepare workspace
+      # --------------------------------------------------
+      - name: Prepare build workspace
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf build-source
+          mkdir -p build-source
+
+          cp -a "$PROJECT_ROOT/." build-source/
+
+          cd build-source
+
+          echo "Build source:"
+          find . -maxdepth 3 -type f | sort
+
+
+      # --------------------------------------------------
+      # 7. Security check
+      # --------------------------------------------------
+      - name: Security check
+        shell: bash
+        run: |
+          set -e
+
+          cd build-source
+
+          FOUND=0
+
+          while IFS= read -r FILE; do
+            echo "FORBIDDEN FILE: $FILE"
+            FOUND=1
+          done < <(
+            find . -type f \
+              \( \
+                -name "*.jks" \
+                -o -name "*.keystore" \
+                -o -name "*.p12" \
+                -o -name "*.pem" \
+                -o -name "*.key" \
+                -o -name "firebase-adminsdk*.json" \
+                -o -name ".env" \
+                -o -name ".env.*" \
+              \)
+          )
+
+          if [ "$FOUND" -ne 0 ]; then
+            echo ""
+            echo "ERROR: Private credential/signing files detected."
+            exit 1
+          fi
+
+          echo "Security check passed."
+
+
+      # --------------------------------------------------
+      # 8. Setup Node
+      # --------------------------------------------------
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: 20
 
-      # 6. Set up Java
-      - name: Setup Java
+
+      # --------------------------------------------------
+      # 9. Setup Java
+      # --------------------------------------------------
+      - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: 17
 
-      # 7. Set up Android SDK
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
 
-      # 8. Install npm dependencies
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -e
-          npm install --no-audit --no-fund
-
-      # 9. Create the Capacitor Android project
-      - name: Create Android project
+      # --------------------------------------------------
+      # 10. Install npm dependencies
+      # --------------------------------------------------
+      - name: Install npm dependencies
+        working-directory: build-source
         shell: bash
         run: |
           set -e
 
-          npx cap add android
+          npm install
 
-      # 10. Apply native Android widgets
-      - name: Apply native widgets
+          echo ""
+          echo "npm installation completed."
+
+
+      # --------------------------------------------------
+      # 11. Add Android platform
+      # --------------------------------------------------
+      - name: Add Capacitor Android
+        working-directory: build-source
         shell: bash
         run: |
           set -e
 
-          python3 native-android/apply-widgets.py
+          if [ -d "android" ]; then
+            echo "Android directory already exists."
+          else
+            npx cap add android
+          fi
 
-      # 11. Add Firebase configuration
+
+      # --------------------------------------------------
+      # 12. Copy Firebase configuration
+      # --------------------------------------------------
       - name: Configure Firebase
+        working-directory: build-source
         shell: bash
         run: |
           set -e
@@ -136,32 +260,66 @@ jobs:
           mkdir -p android/app
 
           cp firebase/google-services.json \
-             android/app/google-services.json
+            android/app/google-services.json
 
           echo "Firebase configuration copied."
 
-      # 12. Sync Capacitor
-      - name: Sync Capacitor
+
+      # --------------------------------------------------
+      # 13. Apply native widgets
+      # --------------------------------------------------
+      - name: Apply native Android widgets
+        working-directory: build-source
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f "native-android/apply-widgets.py" ]; then
+            python3 native-android/apply-widgets.py
+          else
+            echo "Native widget script not found."
+            exit 1
+          fi
+
+
+      # --------------------------------------------------
+      # 14. Capacitor sync
+      # --------------------------------------------------
+      - name: Capacitor sync
+        working-directory: build-source
         shell: bash
         run: |
           set -e
 
           npx cap sync android
 
-      # 13. Verify Android project
+          echo "Capacitor sync completed."
+
+
+      # --------------------------------------------------
+      # 15. Verify Android project
+      # --------------------------------------------------
       - name: Verify Android project
+        working-directory: build-source
         shell: bash
         run: |
           set -e
 
+          test -d android
           test -f android/gradlew
           test -f android/app/google-services.json
 
-          echo "Android project verified."
+          chmod +x android/gradlew
 
-      # 14. Build debug APK
+          echo ""
+          echo "Android project ready."
+
+
+      # --------------------------------------------------
+      # 16. Build DEBUG APK
+      # --------------------------------------------------
       - name: Build debug APK
-        working-directory: android
+        working-directory: build-source/android
         shell: bash
         run: |
           set -e
@@ -170,91 +328,71 @@ jobs:
 
           ./gradlew assembleDebug --no-daemon
 
-      # 15. Verify APK exists
+          echo ""
+          echo "======================================"
+          echo "DEBUG BUILD COMPLETED"
+          echo "======================================"
+
+
+      # --------------------------------------------------
+      # 17. Locate APK
+      # --------------------------------------------------
+      - name: Locate APK
+        working-directory: build-source
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find android/app/build/outputs/apk/debug \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            find android/app/build/outputs -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "APK found:"
+          ls -lh "$APK"
+
+          mkdir -p ../apk-output
+          cp "$APK" ../apk-output/JEE-Tracker-debug.apk
+
+
+      # --------------------------------------------------
+      # 18. Verify APK
+      # --------------------------------------------------
       - name: Verify APK
         shell: bash
         run: |
           set -e
 
-          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          test -f apk-output/JEE-Tracker-debug.apk
 
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: APK was not generated."
+          SIZE=$(stat -c%s apk-output/JEE-Tracker-debug.apk)
+
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "ERROR: APK looks suspiciously small."
             exit 1
           fi
 
-          echo "APK successfully generated:"
-          ls -lh "$APK"
+          echo ""
+          echo "======================================"
+          echo "APK VERIFIED"
+          echo "======================================"
+          echo "File: apk-output/JEE-Tracker-debug.apk"
+          echo "Size: $SIZE bytes"
 
-      # 16. Extract the APK signing certificate
-      - name: Extract APK SHA-1
-        shell: bash
-        run: |
-          set -e
 
-          APK="android/app/build/outputs/apk/debug/app-debug.apk"
-
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -type f \
-            -name apksigner \
-            | sort -V \
-            | tail -n 1)
-
-          if [ -z "$APKSIGNER" ]; then
-            echo "ERROR: apksigner was not found."
-            exit 1
-          fi
-
-          "$APKSIGNER" verify \
-            --print-certs \
-            "$APK" > certificate-info.txt
-
-          cat certificate-info.txt
-
-      # 17. Save Firebase SHA-1
-      - name: Save Firebase SHA-1
-        shell: bash
-        run: |
-          set -e
-
-          grep -i "SHA-1 digest:" certificate-info.txt \
-            > firebase-debug-sha1.txt
-
-          if [ ! -s firebase-debug-sha1.txt ]; then
-            echo "ERROR: SHA-1 certificate digest was not found."
-            exit 1
-          fi
-
-          cat firebase-debug-sha1.txt
-
-      # 18. Generate APK SHA-256 checksum
-      - name: Generate APK SHA-256
-        shell: bash
-        run: |
-          set -e
-
-          sha256sum \
-            android/app/build/outputs/apk/debug/app-debug.apk \
-            > app-debug.apk.sha256
-
-          cat app-debug.apk.sha256
-
+      # --------------------------------------------------
       # 19. Upload APK
-      - name: Upload APK artifact
+      # --------------------------------------------------
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: jee-tracker-debug-apk
-          path: |
-            android/app/build/outputs/apk/debug/app-debug.apk
-            app-debug.apk.sha256
+          name: JEE-Tracker-debug-APK
+          path: apk-output/JEE-Tracker-debug.apk
           if-no-files-found: error
-
-      # 20. Upload certificate information
-      - name: Upload Firebase SHA-1 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: firebase-debug-sha1
-          path: |
-            firebase-debug-sha1.txt
-            certificate-info.txt
-          if-no-files-found: error
+          retention-days: 30
