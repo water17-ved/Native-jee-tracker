@@ -196,7 +196,7 @@ jobs:
       # FIREBASE VALIDATION
       # ---------------------------------------------------------
 
-      - name: Validate Firebase Android identity
+            - name: Validate Firebase Android identity
         working-directory: extracted
         shell: bash
         run: |
@@ -215,22 +215,63 @@ jobs:
 
           data = json.loads(path.read_text())
 
-          client = data["client"][0]
-
-          package_name = (
-              client["client_info"]
-              ["android_client_info"]
-              ["package_name"]
-          )
-
-          app_id = client["mobilesdk_app_id"]
-
           expected_package = "com.vedplayer.jeetracker"
-
           expected_app_id = (
               "1:450231967529:android:"
               "edd1b09ea64992d071e138"
           )
+
+          clients = data.get("client", [])
+
+          if not clients:
+              raise SystemExit(
+                  "ERROR: No Firebase client entries found."
+              )
+
+          matching_client = None
+
+          for client in clients:
+              client_info = client.get("client_info", {})
+              android_info = client_info.get(
+                  "android_client_info", {}
+              )
+
+              package_name = android_info.get("package_name")
+
+              print(
+                  "Found Firebase client package:",
+                  package_name
+              )
+
+              if package_name == expected_package:
+                  matching_client = client
+                  break
+
+          if matching_client is None:
+              raise SystemExit(
+                  "ERROR: Firebase Android package "
+                  f"{expected_package} was not found."
+              )
+
+          client_info = matching_client.get(
+              "client_info", {}
+          )
+
+          package_name = (
+              client_info
+              .get("android_client_info", {})
+              .get("package_name")
+          )
+
+          app_id = matching_client.get(
+              "mobilesdk_app_id"
+          )
+
+          if not app_id:
+              raise SystemExit(
+                  "ERROR: The matching Android Firebase "
+                  "client does not contain mobilesdk_app_id."
+              )
 
           if package_name != expected_package:
               raise SystemExit(
@@ -239,11 +280,14 @@ jobs:
 
           if app_id != expected_app_id:
               raise SystemExit(
-                  f"ERROR: Wrong Firebase app ID: {app_id}"
+                  "ERROR: Wrong Firebase Android App ID.\n"
+                  f"Expected: {expected_app_id}\n"
+                  f"Found:    {app_id}"
               )
 
-          print("Firebase package:", package_name)
-          print("Firebase app ID:", app_id)
+          print("")
+          print("Firebase Android package:", package_name)
+          print("Firebase Android App ID:", app_id)
           print("Firebase identity PASSED.")
           PY
 
