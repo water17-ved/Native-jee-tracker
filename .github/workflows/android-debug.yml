@@ -1,0 +1,187 @@
+name: Build JEE Tracker Android APK from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  JAVA_VERSION: '21'
+
+jobs:
+  build-debug:
+    name: Extract ZIP and build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Find and extract the JEE Tracker project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXTRACT_DIR="$GITHUB_WORKSPACE/_extracted_project"
+          mkdir -p "$EXTRACT_DIR"
+
+          echo "Searching for project ZIP..."
+
+          PROJECT_ZIP=""
+
+          while IFS= read -r zipfile; do
+            echo "Checking: $zipfile"
+
+            if unzip -Z1 "$zipfile" | grep -qx 'package.json' \
+              && unzip -Z1 "$zipfile" | grep -qx 'capacitor.config.ts' \
+              && unzip -Z1 "$zipfile" | grep -qx 'www/index.html'; then
+
+              PROJECT_ZIP="$zipfile"
+              break
+            fi
+          done < <(
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -iname '*.zip' \
+              -not -path '*/_extracted_project/*' \
+              -print | sort
+          )
+
+          if [ -z "$PROJECT_ZIP" ]; then
+            echo "ERROR: JEE Tracker project ZIP was not found."
+            echo "Required ZIP contents:"
+            echo "  package.json"
+            echo "  capacitor.config.ts"
+            echo "  www/index.html"
+            exit 1
+          fi
+
+          echo "Using project ZIP:"
+          echo "$PROJECT_ZIP"
+
+          unzip -q -o "$PROJECT_ZIP" -d "$EXTRACT_DIR"
+
+          PACKAGE_JSON="$(
+            find "$EXTRACT_DIR" \
+              -type f \
+              -name package.json \
+              -print -quit
+          )"
+
+          if [ -z "$PACKAGE_JSON" ]; then
+            echo "ERROR: package.json not found after extraction."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PACKAGE_JSON")"
+
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
+
+          test -f "$PROJECT_DIR/package.json"
+          test -f "$PROJECT_DIR/capacitor.config.ts"
+          test -f "$PROJECT_DIR/www/index.html"
+          test -f "$PROJECT_DIR/www/schedule.html"
+          test -f "$PROJECT_DIR/www/test-analysis.html"
+
+          test -f "$PROJECT_DIR/assets/icon-only.png"
+          test -f "$PROJECT_DIR/assets/logo.png"
+
+          test -f "$PROJECT_DIR/www/icon-192.png"
+          test -f "$PROJECT_DIR/www/icon-512.png"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install npm dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install --no-audit --no-fund
+
+      - name: Add Capacitor Android platform
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npx cap add android
+
+      - name: Generate Android app icons
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npx @capacitor/assets@3.0.5 generate \
+            --android \
+            --assetPath assets \
+            --iconBackgroundColor '#65001f' \
+            --iconBackgroundColorDark '#65001f'
+
+      - name: Sync Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npx cap sync android
+
+      - name: Verify Android project
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f android/gradlew
+          test -f android/settings.gradle
+          test -f android/app/build.gradle
+
+          echo "Android project verified."
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x gradlew
+
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Verify APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
+
+          sha256sum "$APK" | tee app-debug.apk.sha256
+
+          echo "APK successfully created."
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jee-tracker-debug-apk
+          path: |
+            ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
+            ${{ env.PROJECT_DIR }}/app-debug.apk.sha256
+          if-no-files-found: error
